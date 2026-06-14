@@ -202,7 +202,7 @@ def load_model_tokenizer(args):
     if compress_config is not None:
         compress_config.copy_for_all_attention()
         compress_config.calculate_compress_ratio_list(4095, 4096)
-    if "Llama-2" or "Mistral" in args.model:
+    if "Llama-2" or "Llama-3" or "Mistral" in args.model:
         model_kwargs["torch_dtype"] = torch.float16
         model_kwargs["device_map"] = "auto"
         model_kwargs["token"] = args.hf_token

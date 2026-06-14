@@ -1,0 +1,1 @@
+python evaluation_gsm8k.py --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --prompt_file gsm8k_prompt_original.txt --batch_size 8 --max_new_tokens 64 --compress_method KCVT --attention_number 40 --quantize_bit 4 --streaming --streaming_gap 10

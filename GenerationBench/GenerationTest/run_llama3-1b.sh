@@ -1,0 +1,2 @@
+### gsm8k
+python evaluation_gsm8k.py --model meta-llama/Llama-3.2-1B --prompt_file gsm8k_prompt_original.txt --batch_size 6 --max_new_tokens 64 --compress_method KCVT --attention_number 40 --quantize_bit 4 --streaming --streaming_gap 20

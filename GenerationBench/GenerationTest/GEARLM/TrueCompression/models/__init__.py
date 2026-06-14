@@ -1,1 +1,2 @@
 from .TrueCompressLlama import GearLlamaForCausalLMNew
+from .TrueCompressionMistral import GearMistralForCausalLMNew

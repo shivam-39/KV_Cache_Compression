@@ -86,7 +86,7 @@ def extract_ans_mmlu(ans_model):
 def load_model_tokenizer(args):
     from GEARLM import CompressionConfig,SimulatedGearLlamaForCausalLM,SimulatedGearMistralForCausalLM
     model_kwargs = {}
-    if any([name in args.model for name in ["Llama-2", "Vicuna", "Llama-3"]]):
+    if any([name in args.model for name in ["Llama-2", "Llama-3", "Vicuna", "Llama-3"]]):
         model_kwargs["torch_dtype"] = torch.float16 
         model_kwargs["device_map"] = "auto"
         model_kwargs["token"] = args.hf_token

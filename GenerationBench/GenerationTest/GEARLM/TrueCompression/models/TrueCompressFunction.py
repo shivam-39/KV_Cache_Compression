@@ -1,5 +1,31 @@
 import torch
-import time
+from .rank_tracker import append_rank_distribution
+
+
+def get_adaptive_rank(tensor: torch.Tensor, energy_threshold: float = 0.9):
+    """Calculate adaptive rank based on SVD energy threshold."""
+    # Reshape tensor to [batch, seq_len, num_head * sep_dim] for combined-head SVD
+    # print(f"[GET_ADAPTIVE_RANK] Computing SVD for tensor shape {tensor.shape}")
+    if tensor.dim() == 4:
+        # print(f"[GET_ADAPTIVE_RANK] Original tensor shape: {tensor.shape}")
+        batch, num_head, seq_len, sep_dim = tensor.shape
+        tensor_reshaped = tensor.permute(0, 2, 1, 3).reshape(batch, seq_len, num_head * sep_dim)
+    else:
+        tensor_reshaped = tensor
+    
+    tensor_float = tensor_reshaped.float()
+    u, s, v = torch.linalg.svd(tensor_float, full_matrices=False)
+    # print(f"[GET_ADAPTIVE_RANK] SVD computed. Singular values shape: {u.shape}, {s.shape}, {v.shape}")
+    energy = torch.cumsum(s**2, dim=-1) / torch.sum(s**2, dim=-1, keepdim=True)
+    rank = torch.sum(energy < energy_threshold, dim=-1)
+    
+    # Record adaptive ranks for distribution plot
+    if isinstance(rank, torch.Tensor):
+        append_rank_distribution(rank.detach().cpu().tolist())
+    else:
+        append_rank_distribution(int(rank))
+    
+    return min(rank, 16)  # Cap rank at 16 for practical compression
 
 
 def transfer_8bit_to_4bit(input: torch.Tensor):
@@ -49,8 +75,8 @@ def transfer_4bit_to_8bit_batchwise(input: torch.Tensor):
 
 
 def true_uniform_quantization_compress(input: torch.Tensor, quantize_bit):
-    if quantize_bit != 8 and quantize_bit != 4:
-        raise ValueError("quantize_bit should be 8 or 4")
+    if quantize_bit != 8 and quantize_bit != 4 and quantize_bit != 2:
+        raise ValueError("quantize_bit should be 8 or 4 or 2")
     shape = input.shape
     bsz = shape[0]
     input = input.reshape(-1)
@@ -76,8 +102,8 @@ def true_uniform_quantization_compress(input: torch.Tensor, quantize_bit):
 def true_uniform_quantization_decompress(
     input: torch.Tensor, quantize_bit, shape, min, step, dtype
 ):
-    if quantize_bit != 8 and quantize_bit != 4:
-        raise ValueError("quantize_bit should be 8 or 4")
+    if quantize_bit != 8 and quantize_bit != 4 and quantize_bit != 2:
+        raise ValueError("quantize_bit should be 8 or 4 or 2")
     input = input.reshape(-1)
     if quantize_bit == 8:
         input = input.float()
@@ -86,6 +112,10 @@ def true_uniform_quantization_decompress(
     elif quantize_bit == 4:
         input = transfer_4bit_to_8bit(input)
 
+        input = input.type(dtype)
+        input = input * step + min
+        output = input.reshape(shape)
+    elif quantize_bit == 2:
         input = input.type(dtype)
         input = input * step + min
         output = input.reshape(shape)
@@ -125,7 +155,7 @@ def fake_quant_error_simulation(input: torch.Tensor, quantize_bit):
     min, max = input.min(), input.max()
     step = (max - min) / (pow(2, quantize_bit) - 1)
     # print("before min max:",min,max,step)
-    error = input - torch.round((input - min) / step)
+    error = input - (torch.round((input - min) / step)* step + min)
     return error, min, step
 
 
@@ -134,7 +164,18 @@ def true_poweriteration(input: torch.Tensor, loop, rank, p_base=None, q_base=Non
     # -> [batch,seq_len,model_dim] -> [batch * seq_len,model_dim]
     # p_base = torch.rand(input.shape[3] * input.shape[1], rank).to(device)
     # q_base = torch.rand(input.shape[0] * input.shape[2], rank).to(device)
+    # loop = int(loop)   ##check is int casting required
+    # rank = int(rank)
     batch, num_head, seq_len, sep_dim = input.shape
+    
+    # Use adaptive rank if no rank is passed (rank <= 0)
+    # if rank <= 0:
+    # adaptive_ranks = get_adaptive_rank(input)
+    # rank = int(torch.mean(adaptive_ranks.float()).item())
+    # print(f"[TRUE_POWERITERATION] USING ADAPTIVE RANK: {rank} (shape: {batch}x{num_head}x{seq_len}x{sep_dim})")
+    # else:
+        # print(f"[TRUE_POWERITERATION] USING FIXED RANK: {rank}")
+    
     input = (
         input.permute(0, 2, 1, 3).contiguous().view(batch, seq_len, sep_dim * num_head)
     )  # convert to 32bits for qr decomposition
@@ -144,8 +185,8 @@ def true_poweriteration(input: torch.Tensor, loop, rank, p_base=None, q_base=Non
         p_base[0] = p_base[0].float()
         q_base[0] = q_base[0].float()
     else:
-        p_base = [torch.rand(batch, sep_dim * num_head, rank).to(input.device).float()]
-        q_base = [torch.rand(batch, seq_len, rank).to(input.device).float()]
+        p_base = [torch.rand(batch, sep_dim * num_head, int(rank)).to(input.device).float()]
+        q_base = [torch.rand(batch, seq_len, int(rank)).to(input.device).float()]
     # 3 calculation = loop * (matmul) + 2 * qrO(n^2)
     for i in range(loop):
         if i == loop - 1:
@@ -160,6 +201,7 @@ def true_poweriteration(input: torch.Tensor, loop, rank, p_base=None, q_base=Non
     # input = input.type(torch.bfloat16)
     p_base[0] = p_base[0].half()
     q_base[0] = q_base[0].half()
+    
     return p_base, q_base
 
 
@@ -219,8 +261,8 @@ def true_gear_decompress(
 
 def true_uniform_quantization_compress_batchwise(input: torch.Tensor, quantize_bit):
 
-    if quantize_bit != 8 and quantize_bit != 4:
-        raise ValueError("quantize_bit should be 8 or 4")
+    if quantize_bit != 8 and quantize_bit != 4 and quantize_bit != 2:
+        raise ValueError("quantize_bit should be 8 or 4 or 2")
     shape = input.shape
     bsz = shape[0]
     input = input.reshape(bsz, -1)
@@ -246,8 +288,8 @@ def true_uniform_quantization_compress_batchwise(input: torch.Tensor, quantize_b
 def true_uniform_quantization_decompress_batchwise(
     input: torch.Tensor, quantize_bit, shape, min, step, dtype
 ):
-    if quantize_bit != 8 and quantize_bit != 4:
-        raise ValueError("quantize_bit should be 8 or 4")
+    if quantize_bit != 8 and quantize_bit != 4 and quantize_bit != 2:
+        raise ValueError("quantize_bit should be 8 or 4 or 2")
     bsz = shape[0]
     input = input.reshape(bsz, -1)
     if quantize_bit == 8:
@@ -308,7 +350,8 @@ def fake_quant_error_simulation_batchwise(input: torch.Tensor, quantize_bit, bsz
     min = min.unsqueeze(1)  # Expand min tensor shape to (bsz, 1)
     step = step.unsqueeze(1)  # Expand step tensor shape to (bsz, 1)
     # print("before min max:",min,max,step)
-    error = input - torch.round((input - min) / step)
+    # error = input - torch.round((input - min) / step)
+    error = input - (torch.round((input - min) / step) * step + min)
     return error, min, step
 
 

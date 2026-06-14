@@ -1,0 +1,7 @@
+05/23/2026 19:19:22 - INFO - root - Using device: cuda
+05/23/2026 19:19:22 - INFO - root - compress_config: {'compress_mode': 'gear', 'quantize_bit': 8, 'rank': 1.0, 'loop': 3, 'left': 0.02, 'buffer_len': 20, 'stream': False, 'streaming_gap': 1, 'sink_tokens': 4, 'recency_tokens': 70}
+05/23/2026 19:19:22 - INFO - root - Loading TrueCompression Llama model from: TinyLlama/TinyLlama-1.1B-Chat-v1.0
+05/23/2026 19:19:24 - INFO - root - Model parameters on device: cuda:0 (sample dtype=torch.float16)
+05/23/2026 19:19:24 - INFO - root - Preprocessing the dataset.
+05/23/2026 19:19:24 - INFO - root - Parsed 8 few-shot examples from prompt file.
+05/23/2026 19:21:27 - INFO - root - Accuracy: 0.1

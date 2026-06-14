@@ -1,5 +1,6 @@
 from typing import Any, Dict, List, Optional, Tuple
 from .cache_utils import Cache
+from .compressed_cache_utils import FPBuffer
 import torch
 from .TrueCompressFunction import (
     true_uniform_quantization_compress,
@@ -38,6 +39,13 @@ decompress_function = {
 
 
 class StreamCompressedUnion:
+    """Holds one compressed K/V prefix slab for StreamCompressedCache.
+
+    FP tail buffering and the flush threshold (buffer_len) live on
+    StreamCompressedCache, not inside this union.  The old streaming_gap /
+    counter-based inner buffer has been replaced by the v2 cache-level tail.
+    """  # for new method
+
     def __init__(self, compress_kwargs: Optional[Dict[str, Any]] = None):
         self.quantize_bit = compress_kwargs["quantize_bit"]
         self.compress_mode = compress_kwargs["compress_mode"]
@@ -55,123 +63,104 @@ class StreamCompressedUnion:
         self.p_base = None
         self.q_base = None
         self.counter = 0
-        self.gap = compress_kwargs["streaming_gap"]
+        # for new method: gap kept for config compatibility / increase_idx; tail flush driven by buffer_len on cache
+        self.gap = compress_kwargs.get("streaming_gap", 1)
         self.cache_shape = None
         self.buffer = None
-        self.cache_shape = None
 
+    # for new method: store full FP slab; old streaming_gap inner-slice logic removed
     def set_cache(self, input: torch.Tensor):
-
         self.shape = input.shape
-        # # has_inf = torch.isinf(input)
-        # # has_nan = torch.isnan(input)
-        # # print(self.counter,has_inf.any(),has_nan.any())
-        # if self.counter != 1 and self.counter % self.gap == 0:
-        #     # self.cache = input[:,:,0:-self.counter,:]
-        #     self.buffer = input[:,:,-self.counter:,:].clone()
-        #     del input
-        # else:
+        self.cache = input
+        self.cache_shape = input.shape
+        self.buffer = None
 
-        #     self.cache = input
-        #     # self.cache = input
-        #     pass
-        # print("set_cache",self.counter)
-        # print(self.cache.dtype)
-        if self.counter == 0 or self.counter % self.gap == 0:
-            self.cache = input
-            self.cache_shape = input.shape
-            self.buffer = None
-        else:
-            buffer_token = self.counter % self.gap
-            self.buffer = input[:, :, -buffer_token:, :].clone()
-            del input
-
+    # for new method
     def get_cache(self):
-        if self.counter == 0 or self.counter % self.gap == 0:
+        if not self.is_compressed:
             return self.cache
-        else:
-            return self.decompress(True)
+        return self.decompress_readonly()
 
+    # for new method: always compress full self.cache (flush cadence set by buffer_len on cache, not counter%gap)
     def compress(self):
-
         input = self.cache
+        if input is None:
+            return
         self.dtype = input.dtype
         self.is_compressed = True
-        if self.counter == 0 or self.counter % self.gap == 0:
-            if self.compress_mode == "uniform":
-                output, shape, min, step = compress_function[self.compress_mode](
-                    input, self.quantize_bit
+        if self.compress_mode == "uniform":
+            output, shape, min, step = compress_function[self.compress_mode](
+                input, self.quantize_bit
+            )
+            self.cache = output
+            self.min = min
+            self.step = step
+
+        elif self.compress_mode == "outlier":
+            output, shape, min, step, values, indices = compress_function[
+                self.compress_mode
+            ](input, self.quantize_bit, self.left)
+            self.cache = output
+            self.min = min
+            self.step = step
+            self.values = values
+            self.indices = indices
+
+        elif self.compress_mode == "gear":
+            output, shape, min, step, values, indices, p_base, q_base = (
+                compress_function[self.compress_mode](
+                    input, self.quantize_bit, self.left, self.rank, self.loop
                 )
-                self.cache = output
-                self.min = min
-                self.step = step
+            )
+            self.cache = output
+            self.min = min
+            self.step = step
+            self.values = values
+            self.indices = indices
+            self.p_base = p_base
+            self.q_base = q_base
 
-            elif self.compress_mode == "outlier":
-                output, shape, min, step, values, indices = compress_function[
-                    self.compress_mode
-                ](input, self.quantize_bit, self.left)
-                self.cache = output
-                self.min = min
-                self.step = step
+        elif self.compress_mode == "uniform_batch":
+            output, shape, min, step = compress_function[self.compress_mode](
+                input, self.quantize_bit
+            )
+            self.cache = output
+            self.min = min
+            self.step = step
 
-                self.values = values
-                self.indices = indices
-            elif self.compress_mode == "gear":
-                output, shape, min, step, values, indices, p_base, q_base = (
-                    compress_function[self.compress_mode](
-                        input, self.quantize_bit, self.left, self.rank, self.loop
-                    )
+        elif self.compress_mode == "outlier_batch":
+            output, shape, min, step, values, indices = compress_function[
+                self.compress_mode
+            ](input, self.quantize_bit, self.left)
+            self.cache = output
+            self.min = min
+            self.step = step
+            self.values = values
+            self.indices = indices
+
+        elif self.compress_mode == "gear_batch":
+            output, shape, min, step, values, indices, p_base, q_base = (
+                compress_function[self.compress_mode](
+                    input, self.quantize_bit, self.left, self.rank, self.loop
                 )
-                self.cache = output
-                self.min = min
-                self.step = step
+            )
+            self.cache = output
+            self.min = min
+            self.step = step
+            self.values = values
+            self.indices = indices
+            self.p_base = p_base
+            self.q_base = q_base
 
-                self.values = values
-                self.indices = indices
-                self.p_base = p_base
-                self.q_base = q_base
-            elif self.compress_mode == "uniform_batch":
-                output, shape, min, step = compress_function[self.compress_mode](
-                    input, self.quantize_bit
-                )
-                self.cache = output
-                self.min = min
-                self.step = step
+        self.buffer = None
 
-            elif self.compress_mode == "outlier_batch":
-                output, shape, min, step, values, indices = compress_function[
-                    self.compress_mode
-                ](input, self.quantize_bit, self.left)
-                self.cache = output
-                self.min = min
-                self.step = step
-
-                self.values = values
-                self.indices = indices
-            elif self.compress_mode == "gear_batch":
-                output, shape, min, step, values, indices, p_base, q_base = (
-                    compress_function[self.compress_mode](
-                        input, self.quantize_bit, self.left, self.rank, self.loop
-                    )
-                )
-                self.cache = output
-                self.min = min
-                self.step = step
-
-                self.values = values
-                self.indices = indices
-                self.p_base = p_base
-                self.q_base = q_base
-            self.buffer = None
-        else:
-            pass
-        # print("compress",self.counter)
-        # print(self.cache.dtype)
-
-    def decompress(self, flag=False):
-        self.is_compressed = flag
-        # print("decompress",self.counter)
-        # print(self.cache.dtype)
+    # for new method: shared reconstruction kernel used by both decompress paths
+    def _reconstruct(self) -> torch.Tensor:
+        if not self.is_compressed:
+            out = self.cache
+            if self.buffer is not None:
+                return torch.cat([out, self.buffer], dim=2)
+            return out
         if self.compress_mode == "uniform":
             output = decompress_function[self.compress_mode](
                 self.cache,
@@ -238,12 +227,22 @@ class StreamCompressedUnion:
                 self.p_base,
                 self.q_base,
             )
-        # self.clean_cache()
+        else:
+            raise ValueError(f"Unknown compress_mode {self.compress_mode}")
         if self.buffer is not None:
             output = torch.cat([output, self.buffer], dim=2)
-        # print(self.counter,output.shape)
         return output
 
+    # for new method: non-destructive read; legacy flag argument dropped but accepted for call-site compatibility
+    def decompress(self, flag=False):
+        del flag
+        return self._reconstruct()
+
+    # for new method: read-only reconstruct, packed state untouched
+    def decompress_readonly(self) -> torch.Tensor:
+        return self._reconstruct()
+
+    # for new method
     def clean_cache(self):
         self.is_compressed = False
         self.cache = None
@@ -253,19 +252,36 @@ class StreamCompressedUnion:
         self.q_base = None
         self.min = None
         self.step = None
+        self.buffer = None
 
 
 class StreamCompressedCache(Cache):
     def __init__(self) -> None:
-        self.key_cache: List[torch.Tensor] = []
-        self.value_cache: List[torch.Tensor] = []
+        # per-layer compressed prefix (StreamCompressedUnion or None before first flush)
+        self.key_cache: List[Optional[Any]] = []
+        self.value_cache: List[Optional[Any]] = []
+        # per-layer FPBuffer instances replacing the old key_tail / value_tail flat tensors
+        self.fp_buffers_key: List[Optional[FPBuffer]] = []
+        self.fp_buffers_value: List[Optional[FPBuffer]] = []
+        # token count of the compressed prefix for each layer
+        self._prefix_seq_lens: List[int] = []
+        # kwargs snapshot per layer for creating unions at flush time
+        self._compress_kwargs_store: List[Optional[Dict[str, Any]]] = []
+        # FPBuffer construction params, latched once from the first compress_kwargs
+        self._sink_tokens: Optional[int] = None
+        self._recency_tokens: Optional[int] = None
+        self._buffer_len: Optional[int] = None
         self.seen_tokens = (
             0  # Used in `generate` to keep tally of how many tokens the cache has seen
         )
 
     def increase_idx(self, layer_idx):
-        self.key_cache[layer_idx].counter += 1
-        self.value_cache[layer_idx].counter += 1
+        ku = self.key_cache[layer_idx]
+        vu = self.value_cache[layer_idx]
+        if ku is not None:
+            ku.counter += 1
+        if vu is not None:
+            vu.counter += 1
 
     def __setitem__(
         self, layer_idx: int, key_value_states: Tuple[torch.Tensor, torch.Tensor]
@@ -307,6 +323,34 @@ class StreamCompressedCache(Cache):
         """
         return len(self.key_cache)
 
+    def _flush_to_prefix(self, layer_idx: int, to_compress_k: torch.Tensor, to_compress_v: torch.Tensor):
+        """Merge to_compress tensors into the compressed prefix for layer_idx."""
+        prefix_k = self.key_cache[layer_idx]
+        prefix_v = self.value_cache[layer_idx]
+
+        if prefix_k is not None and prefix_k.is_compressed:
+            prefix_fp_k = prefix_k.decompress_readonly()
+            prefix_fp_v = prefix_v.decompress_readonly()
+            merged_k = torch.cat([prefix_fp_k, to_compress_k], dim=-2)
+            merged_v = torch.cat([prefix_fp_v, to_compress_v], dim=-2)
+            prefix_k.clean_cache()
+            prefix_v.clean_cache()
+        else:
+            merged_k = to_compress_k
+            merged_v = to_compress_v
+
+        kwargs = self._compress_kwargs_store[layer_idx]
+        new_key_union = StreamCompressedUnion(kwargs)
+        new_value_union = StreamCompressedUnion(kwargs)
+        new_key_union.set_cache(merged_k)
+        new_value_union.set_cache(merged_v)
+        new_key_union.compress()
+        new_value_union.compress()
+
+        self.key_cache[layer_idx] = new_key_union
+        self.value_cache[layer_idx] = new_value_union
+        self._prefix_seq_lens[layer_idx] = merged_k.shape[-2]
+
     def update(
         self,
         key_states: torch.Tensor,
@@ -314,75 +358,104 @@ class StreamCompressedCache(Cache):
         layer_idx: int,
         compress_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx`.
-
-        Parameters:
-            key_states (`torch.Tensor`):
-                The new key states to cache.
-            value_states (`torch.Tensor`):
-                The new value states to cache.
-            layer_idx (`int`):
-                The index of the layer to cache the states for.
-            cache_kwargs (`Dict[str, Any]`, `optional`):
-                Additional arguments for the cache subclass. No additional arguments are used in `DynamicCache`.
-
-        Return:
-            A tuple containing the updated key and value states.
-        """
-        # Update the number of seen tokens
         if layer_idx == 0:
             self.seen_tokens += key_states.shape[-2]
-        # print(isinstance(key_states, Cache))
-        # Update the cache
-        if len(self.key_cache) <= layer_idx:
-            # apply compress here if needed
-            if compress_kwargs is not None:
 
-                key_union = StreamCompressedUnion(compress_kwargs)
-                value_union = StreamCompressedUnion(compress_kwargs)
-                key_union.set_cache(key_states)
-                value_union.set_cache(value_states)
-                self.key_cache.append(key_union)
-                self.value_cache.append(value_union)
-            else:
-                self.key_cache.append(key_states)
-                self.value_cache.append(value_states)
-        else:
-            if compress_kwargs is not None:
-                key_union = self.key_cache[layer_idx]
-                value_union = self.value_cache[layer_idx]
-                if key_union.is_compressed and value_union.is_compressed:
-                    previous_key = key_union.decompress()
-                    previous_value = value_union.decompress()
-                key_union.set_cache(torch.cat([previous_key, key_states], dim=-2))
-                value_union.set_cache(torch.cat([previous_value, value_states], dim=-2))
-            else:
-                self.key_cache[layer_idx] = torch.cat(
-                    [self.key_cache[layer_idx], key_states], dim=-2
-                )
-                self.value_cache[layer_idx] = torch.cat(
-                    [self.value_cache[layer_idx], value_states], dim=-2
-                )
         if compress_kwargs is not None:
-            return key_union.get_cache(), value_union.get_cache()
+            # Latch FPBuffer construction params once from the first call
+            if self._sink_tokens is None:
+                self._sink_tokens = compress_kwargs.get("sink_tokens", 0)
+                self._recency_tokens = compress_kwargs.get("recency_tokens", 0)
+                self._buffer_len = compress_kwargs.get("buffer_len", 0)
+
+            if len(self.fp_buffers_key) <= layer_idx:
+                # First call for this layer — initialise prefix slot and FPBuffers
+                self.key_cache.append(None)
+                self.value_cache.append(None)
+                self._prefix_seq_lens.append(0)
+                self._compress_kwargs_store.append(compress_kwargs)
+                self.fp_buffers_key.append(
+                    FPBuffer(self._sink_tokens, self._recency_tokens, self._buffer_len)
+                )
+                self.fp_buffers_value.append(
+                    FPBuffer(self._sink_tokens, self._recency_tokens, self._buffer_len)
+                )
+
+            buf_k = self.fp_buffers_key[layer_idx]
+            buf_v = self.fp_buffers_value[layer_idx]
+
+            # Append to FPBuffer; returns tokens to compress on flush, else None
+            to_compress_k = buf_k.append(key_states)
+            to_compress_v = buf_v.append(value_states)
+
+            if to_compress_k is not None:
+                self._flush_to_prefix(layer_idx, to_compress_k, to_compress_v)
+
+            # Build full FP view for attention: decompress(prefix) ‖ fp_buffer
+            prefix_k = self.key_cache[layer_idx]
+            prefix_v = self.value_cache[layer_idx]
+            fp_view_k = buf_k.get_fp_view()
+            fp_view_v = buf_v.get_fp_view()
+
+            if prefix_k is not None and prefix_k.is_compressed:
+                prefix_fp_k = prefix_k.decompress_readonly()
+                prefix_fp_v = prefix_v.decompress_readonly()
+                full_key = torch.cat([prefix_fp_k, fp_view_k], dim=-2)
+                full_value = torch.cat([prefix_fp_v, fp_view_v], dim=-2)
+            else:
+                full_key = fp_view_k
+                full_value = fp_view_v
+
+            return full_key, full_value
+
+        # fallback: no compress_kwargs, plain tensor cache
+        if len(self.key_cache) <= layer_idx:
+            self.key_cache.append(key_states)
+            self.value_cache.append(value_states)
         else:
-            return self.key_cache[layer_idx], self.value_cache[layer_idx]
+            self.key_cache[layer_idx] = torch.cat(
+                [self.key_cache[layer_idx], key_states], dim=-2
+            )
+            self.value_cache[layer_idx] = torch.cat(
+                [self.value_cache[layer_idx], value_states], dim=-2
+            )
+        return self.key_cache[layer_idx], self.value_cache[layer_idx]
 
     def compress(self, layer_idx: int):
+        """No-op: flushing is now driven entirely inside FPBuffer.append() during update().
+
+        Kept for call-site compatibility with the model forward pass.
+        Legacy plain-tensor path (no FPBuffer) still handled below.
+        """
+        if layer_idx < len(self.fp_buffers_key):
+            return
+
+        # Legacy path (no FPBuffer initialised for this layer)
         if len(self.key_cache) <= layer_idx:
             return
         key_union = self.key_cache[layer_idx]
         value_union = self.value_cache[layer_idx]
-        if not key_union.is_compressed and not value_union.is_compressed:
+        if (
+            key_union is not None
+            and value_union is not None
+            and not key_union.is_compressed
+            and not value_union.is_compressed
+        ):
             key_union.compress()
             value_union.compress()
 
     def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
-        """Returns the sequence length of the cached states. A layer index can be optionally passed."""
-        if len(self.key_cache) <= layer_idx:
+        """Returns the total sequence length (compressed prefix + FP buffer) for the given layer."""
+        return self.get_cur_seq_len(layer_idx)
+
+    def get_cur_seq_len(self, layer_idx: int = 0) -> int:
+        """Returns prefix_len + fp_buffer total_len for the given layer."""
+        if layer_idx >= len(self._prefix_seq_lens):
             return 0
-        return self.key_cache[layer_idx].shape[-2]
+        prefix_len = self._prefix_seq_lens[layer_idx]
+        buf = self.fp_buffers_key[layer_idx] if layer_idx < len(self.fp_buffers_key) else None
+        buf_len = buf.total_len() if buf is not None else 0
+        return prefix_len + buf_len
 
     def get_max_length(self) -> Optional[int]:
         """Returns the maximum sequence length of the cached states. DynamicCache does not have a maximum length."""
@@ -391,14 +464,13 @@ class StreamCompressedCache(Cache):
     def reorder_cache(self, beam_idx: torch.LongTensor):
         """Reorders the cache for beam search, given the selected beam indices."""
         for layer_idx in range(len(self.key_cache)):
-            device = self.key_cache[layer_idx].device
-            self.key_cache[layer_idx] = self.key_cache[layer_idx].index_select(
-                0, beam_idx.to(device)
-            )
-            device = self.value_cache[layer_idx].device
-            self.value_cache[layer_idx] = self.value_cache[layer_idx].index_select(
-                0, beam_idx.to(device)
-            )
+            k = self.key_cache[layer_idx]
+            v = self.value_cache[layer_idx]
+            if isinstance(k, torch.Tensor) and isinstance(v, torch.Tensor):
+                device = k.device
+                self.key_cache[layer_idx] = k.index_select(0, beam_idx.to(device))
+                device = v.device
+                self.value_cache[layer_idx] = v.index_select(0, beam_idx.to(device))
 
     def to_legacy_cache(self) -> Tuple[Tuple[torch.Tensor], Tuple[torch.Tensor]]:
         """Converts the `DynamicCache` instance into the its equivalent in the legacy cache format."""
@@ -410,12 +482,11 @@ class StreamCompressedCache(Cache):
     @classmethod
     def from_legacy_cache(
         cls, past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
-    ) -> "DynamicCache":
-        """Converts a cache in the legacy cache format into an equivalent `DynamicCache`."""
+    ) -> "StreamCompressedCache":
+        """Converts a cache in the legacy cache format into an equivalent `StreamCompressedCache`."""
         cache = cls()
         if past_key_values is not None:
             for layer_idx in range(len(past_key_values)):
-
                 key_states, value_states = past_key_values[layer_idx]
                 cache.update(key_states, value_states, layer_idx)
         return cache

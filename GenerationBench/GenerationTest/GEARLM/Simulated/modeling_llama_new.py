@@ -41,7 +41,7 @@ from transformers.modeling_outputs import (
     CausalLMOutputWithPast,
     SequenceClassifierOutputWithPast,
 )
-from transformers.modeling_utils import PreTrainedModel
+from transformers.modeling_utils import PreTrainedModel, GenerationMixin
 from transformers.pytorch_utils import (
     ALL_LAYERNORM_LAYERS,
     is_torch_greater_or_equal_than_1_13,
@@ -1464,7 +1464,7 @@ class LlamaModel(LlamaPreTrainedModel):
         )
 
 
-class SimulatedGearLlamaForCausalLM(LlamaPreTrainedModel):
+class SimulatedGearLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config, compress_config=None):
@@ -1610,11 +1610,16 @@ class SimulatedGearLlamaForCausalLM(LlamaPreTrainedModel):
         inputs_embeds=None,
         **kwargs,
     ):
+        if isinstance(past_key_values, tuple) and len(past_key_values) == 0:
+            past_key_values = None
+
         if past_key_values is not None:
-            if isinstance(past_key_values, Cache):
+            if isinstance(past_key_values, Cache) or hasattr(past_key_values, "get_seq_length"):
                 cache_length = past_key_values.get_seq_length()
                 past_length = past_key_values.seen_tokens
                 max_cache_length = past_key_values.get_max_length()
+            elif hasattr(past_key_values, "__len__") and len(past_key_values) == 0:
+                past_key_values = None
             else:
                 cache_length = past_length = past_key_values[0][0].shape[2]
                 max_cache_length = None

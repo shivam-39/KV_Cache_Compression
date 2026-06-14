@@ -4,6 +4,42 @@ import torch.nn.functional as F
 import torch.nn as nn
 import numpy as np
 
+
+# class H2OCache:
+#     def __init__(self, size: int):
+#         self.size = size
+
+#     def selection(self, attn_weights, key_states, value_states, query_states):
+#         return key_states, value_states, query_states
+
+
+class H2OCache:
+    """Stub: symbol imported by Simulated Llama/Mistral but missing in this tree.
+
+    TrueCompression loads GEARLM/__init__.py which imports Simulated, which
+    imports H2OCache. This stub lets that import succeed and passes through
+    selection() as a no-op so non-H2O runs work correctly.
+    Do NOT use compress_method='H2O' with this stub; add a real impl if needed.
+    """
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def selection(self, attn_weights, key_states, value_states, query_states):
+        return key_states, value_states, query_states
+
+
+def get_adaptive_rank(tensor: torch.Tensor, energy_threshold: float = 0.5):
+    # print("Calculating adaptive rank...")
+    shape = tensor.shape
+    batch, num_head, seq_len, head_dim = shape
+    tensor = tensor.float()
+    u, s, v = torch.linalg.svd(tensor)
+    energy = torch.cumsum(s**2, dim=-1) / torch.sum(s**2, dim=-1, keepdim=True)
+    rank = torch.sum(energy < energy_threshold, dim=-1)
+    return rank
+
+
 def fake_groupwise_token_asymmetric_quantization( ####
     input: torch.Tensor, quantize_bit, group_size=128
 ):
@@ -74,6 +110,10 @@ def fake_poweriteration_group(input: torch.Tensor, loop, rank, device, p_base, q
     dtype = input.dtype
     batch, dim1, dim2, dim3 = input.shape
 
+    # Use adaptive rank if no rank is passed (rank <= 0)
+    # if rank <= 0:
+    adaptive_ranks = get_adaptive_rank(input)
+    rank = int(torch.mean(adaptive_ranks.float()).item())
 
     input = input.float()
     if q_base is not None and p_base is not None:

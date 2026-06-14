@@ -347,7 +347,7 @@ if __name__ == "__main__":
     evaluation_result_file = output_dir / f"evaluation_gsm8k.json"
 
     split = "test" if args.example_subset is None else f"test[{args.example_subset}]"
-    eval_dataset = load_dataset("gsm8k", "main", split=split, ignore_verifications=True)
+    eval_dataset = load_dataset("gsm8k", "main", split=split)
     tb_writter = SummaryWriter(log_dir=str(output_dir.resolve()))
     logging.basicConfig(
         filename=os.path.join(output_dir.resolve(), "log.txt"),
@@ -361,19 +361,19 @@ if __name__ == "__main__":
     # Load Model and Tokenizer
     model_kwargs = {}
 
-    if "Llama-2" or "Mistral" in args.model:
+    if "Llama-2" in args.model  or "Llama-3" in args.model or "Mistral" in args.model or "tinyllama" in args.model.lower():
         model_kwargs["torch_dtype"] = torch.float16
         model_kwargs["device_map"] = "auto"
         model_kwargs["token"] = args.hf_token
         model_kwargs["cache_dir"] = "../cache"
+        # model_kwargs["offload_buffers"] = True
     else:
         raise ValueError(f"Model {args.model} not supported")
     
     config = transformers.AutoConfig.from_pretrained(
         args.model,
-        use_auth_token=True,
         token=args.hf_token,
-        use_flash_attn=False,
+        use_flash_attn=True,
         trust_remote_code=True,
     )
 
@@ -406,7 +406,7 @@ if __name__ == "__main__":
         compress_config.copy_for_all_attention()
         compress_config.calculate_compress_ratio_list(4095, 4096)
     
-    if "Llama" in args.model:
+    if "Llama" in args.model or "tinyllama" in args.model.lower():
        
         model = SimulatedGearLlamaForCausalLM.from_pretrained(
             args.model,
@@ -427,9 +427,8 @@ if __name__ == "__main__":
         from transformers import AutoTokenizer
         config = MistralConfig.from_pretrained(
             args.model,
-            use_auth_token=True,
             token=args.hf_token,
-            use_flash_attn=False,
+            use_flash_attn=True,
             trust_remote_code=True,
         )
         model = SimulatedGearMistralForCausalLM.from_pretrained(
@@ -450,6 +449,18 @@ if __name__ == "__main__":
         )
         # tokenizer.add_special_tokens({'pad_token': '[PAD]'})
         tokenizer.pad_token = tokenizer.eos_token
+    
+    # Ensure model is on the correct device (only if not using device_map)
+    # With device_map="auto", the model is already distributed optimally
+    try:
+        if hasattr(model, 'hf_device_map') and model.hf_device_map:
+            logging.info("Model is using device_map, skipping manual device placement")
+        else:
+            if not next(model.parameters()).is_cuda:
+                model = model.to("cuda")
+    except Exception as e:
+        logging.warning(f"Could not verify device placement: {e}")
+    
     logging.info("Preprocessing the dataset.")
     with open(f"lib_prompt/{args.prompt_file}", "r") as handle:
         prompt_cot = handle.read()

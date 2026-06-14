@@ -497,10 +497,11 @@ class LlamaAttention(nn.Module):
         if past_key_value is not None:
             # TODO : add compress_config and compress functions
             # cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
-            cache_kwargs = (
-                self.compress_config if self.compress_config is not None else {}
-            )
-            cache_kwargs["sin"] = sin
+            # cache_kwargs = (
+            #     self.compress_config if self.compress_config is not None else {}
+            # )
+            cache_kwargs = dict(self.compress_config) if self.compress_config is not None else {} # to avoid the muttaion of the shared config 
+            cache_kwargs["sin"] = sin  #this was causing the error of the shared config
             cache_kwargs["cos"] = cos
             key_states, value_states = past_key_value.update(
                 key_states, value_states, self.layer_idx, cache_kwargs
@@ -881,9 +882,8 @@ class LlamaSdpaAttention(LlamaAttention):
         if past_key_value is not None:
             # TODO : add compress_config and compress functions
             # cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
-            cache_kwargs = (
-                self.compress_config if self.compress_config is not None else {}
-            )
+            cache_kwargs = dict(self.compress_config ) if self.compress_config is not None else {}
+        
             cache_kwargs["sin"] = sin
             cache_kwargs["cos"] = cos
             key_states, value_states = past_key_value.update(
@@ -1317,7 +1317,7 @@ class LlamaModel(LlamaPreTrainedModel):
         if use_cache:
             next_cache = (
                 next_decoder_cache.to_legacy_cache()
-                if use_legacy_cache
+                if use_legacy_cache and not isinstance(next_decoder_cache, (CompressedCache, StreamCompressedCache))
                 else next_decoder_cache
             )
         if not return_dict:

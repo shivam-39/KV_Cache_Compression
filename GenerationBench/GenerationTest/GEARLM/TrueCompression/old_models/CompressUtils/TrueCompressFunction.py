@@ -49,8 +49,8 @@ def transfer_4bit_to_8bit_batchwise(input: torch.Tensor):
 
 
 def true_uniform_quantization_compress(input: torch.Tensor, quantize_bit):
-    if quantize_bit != 8 and quantize_bit != 4:
-        raise ValueError("quantize_bit should be 8 or 4")
+    if quantize_bit != 8 and quantize_bit != 4 and quantize_bit != 2:
+        raise ValueError("quantize_bit should be 8 or 4 or 2")
     shape = input.shape
     bsz = shape[0]
     input = input.reshape(-1)
@@ -76,8 +76,8 @@ def true_uniform_quantization_compress(input: torch.Tensor, quantize_bit):
 def true_uniform_quantization_decompress(
     input: torch.Tensor, quantize_bit, shape, min, step, dtype
 ):
-    if quantize_bit != 8 and quantize_bit != 4:
-        raise ValueError("quantize_bit should be 8 or 4")
+    if quantize_bit != 8 and quantize_bit != 4 and quantize_bit != 2:
+        raise ValueError("quantize_bit should be 8 or 4 or 2")
     input = input.reshape(-1)
     if quantize_bit == 8:
         input = input.float()
@@ -263,8 +263,8 @@ def true_gear_decompress(
 
 def true_uniform_quantization_compress_batchwise(input: torch.Tensor, quantize_bit):
 
-    if quantize_bit != 8 and quantize_bit != 4:
-        raise ValueError("quantize_bit should be 8 or 4")
+    if quantize_bit != 8 and quantize_bit != 4 and quantize_bit != 2:
+        raise ValueError("quantize_bit should be 8 or 4 or 2")
     shape = input.shape
     bsz = shape[0]
     input = input.reshape(bsz, -1)
@@ -290,8 +290,8 @@ def true_uniform_quantization_compress_batchwise(input: torch.Tensor, quantize_b
 def true_uniform_quantization_decompress_batchwise(
     input: torch.Tensor, quantize_bit, shape, min, step, dtype
 ):
-    if quantize_bit != 8 and quantize_bit != 4:
-        raise ValueError("quantize_bit should be 8 or 4")
+    if quantize_bit != 8 and quantize_bit != 4 and quantize_bit != 2:
+        raise ValueError("quantize_bit should be 8 or 4 or 2")
 
     bsz = shape[0]
     input = input.reshape(bsz, -1)
